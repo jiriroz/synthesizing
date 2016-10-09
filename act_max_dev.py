@@ -103,9 +103,7 @@ def main():
         lower_bound = np.zeros(start_code.shape)
 
     #compute objective
-    if args.obj != "":
-        objective = get_code(args.obj, args.act_layer)
-
+    objective = computeObjective(args.obj, args.act_layer, net=net)
 
     # Optimize a code via gradient ascent
     output_image = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
@@ -122,6 +120,7 @@ def main():
             args.start_lr,
             args.seed
             )
+    filename = "example.jpg" #overwrite for simple access
 
     # Save image
     save_image(output_image, filename)
@@ -134,7 +133,7 @@ def main():
 def parseArguments():
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('--unit', metavar='unit', type=int, help='an unit to visualize e.g. [0, 999]')
-    parser.add_argument('--obj', metavar='obj', type=str, default="" help='an objective (filename)')
+    parser.add_argument('--obj', metavar='obj', type=str, default="", help='an objective (filename)')
     parser.add_argument('--n_iters', metavar='iter', type=int, default=10, help='Number of iterations')
     parser.add_argument('--L2', metavar='w', type=float, default=1.0, nargs='?', help='L2 weight')
     parser.add_argument('--start_lr', metavar='lr', type=float, default=2.0, nargs='?', help='Learning rate')
@@ -153,7 +152,31 @@ def parseArguments():
 
     args = parser.parse_args()
     return args
+
         
+
+def computeObjective(obj, act_layer, net=None):
+
+    if obj != "":
+        objective, _ = get_code(obj, act_layer, net=net)
+
+    #custom objective here
+
+    objective = get_average(["cat.jpg", "black_cat.jpg", "yellow_cat.jpg"], act_layer, net)
+
+    #Image arithmetic
+    #base_img, _ = get_code("cat_leash2.jpg", act_layer, net=net)
+    #img_subtract, _ = get_code("cat_noleash.jpg", act_layer, net=net)
+    #img_onto, _ = get_code("dog.jpg", act_layer, net=net)
+    #diff = base_img - img_subtract
+    #objective = diff + img_onto
+    return objective
+
+def get_average(imgs, act, net):
+    reprs = [get_code("data/" + im, act, net=net)[0] for im in imgs]
+    return np.mean(reprs)
+
+
 def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
         clip=False, debug=False, unit=None, xy=0, upper_bound=None, lower_bound=None, objective=None):
 
@@ -203,7 +226,7 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
 
         # 2. forward pass the image x0 to net to maximize an unit k
         # 3. backprop the gradient from net to the image to get an updated image x
-        grad_norm_net, x, act = make_step_net(net=net, end=layer, objective=unit, image=cropped_x0, xy=xy, step_size=step_size)
+        grad_norm_net, x, act = make_step_net(net=net, end=layer, objective=objective, image=cropped_x0, xy=xy, step_size=step_size, output=i % 5 == 0)
         
         # Save the solution
         # Note that we're not saving the solutions with the highest activations
@@ -265,13 +288,13 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
 
             write_label(name, act)
 
-            return best_xx
+    return best_xx
 
 
 '''
 Push the given image through an encoder to get a code.
 '''
-def get_code(path, layer):
+def get_code(path, layer, net=None):
 
 
     # set up the inputs for the net: 
@@ -297,7 +320,10 @@ def get_code(path, layer):
     data -= np.expand_dims(np.transpose(image_mean, (2,0,1)), 0) # mean is already BGR
 
     # initialize the encoder
-    encoder = caffe.Net(settings.encoder_definition, settings.encoder_weights, caffe.TEST)
+    if net == None:
+        encoder = caffe.Net(settings.encoder_definition, settings.encoder_weights, caffe.TEST)
+    else:
+        encoder = net
 
     # run encoder and extract the features
     encoder.forward(data=data)
@@ -308,41 +334,10 @@ def get_code(path, layer):
 
     return zero_feat, data
 
-
-'''
-Forward and backward passes through the generator DNN.
-'''
-def make_step_generator(net, x, x0, start, end, step_size=1):
-
-
-    src = net.blobs[start] # input image is stored in Net's 'data' blob
-    dst = net.blobs[end]
-
-    # L2 distance between init and target vector
-    net.blobs[end].diff[...] = (x-x0)
-    net.backward(start=end)
-    g = net.blobs[start].diff.copy()
-
-    grad_norm = norm(g)
-
-    # reset objective after each step
-    dst.diff.fill(0.)
-
-    # If norm is Nan, skip updating the image
-    if math.isnan(grad_norm):
-        return 1e-12, src.data[:].copy()  
-    elif grad_norm == 0:
-        return 0, src.data[:].copy()
-
-    # Make an update
-    src.data[:] += step_size/np.abs(g).mean() * g
-
-    return grad_norm, src.data[:].copy()
-
 '''
 Forward and backward passes through the DNN being visualized.
 '''
-def make_step_net(net, end, objective, image, xy=0, step_size=1):
+def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True):
 
 
     src = net.blobs['data'] # input image
@@ -394,12 +389,48 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1):
         best_unit = fc.argmax()
         obj_act = fc[objective]
 
-    print "max: %4s [%.2f]\t obj: %4s [%.2f]\t norm: [%.2f]" % (best_unit, fc[best_unit], objective, obj_act, grad_norm)
+    if output:
+        if type(objective) is np.ndarray:
+            diff_norm = norm(updated_diff)
+            print "Diff norm: %.2f, opt norm: %.2f" % (diff_norm, grad_norm)
+        else:
+            print "max: %4s [%.2f]\t obj: %4s [%.2f]\t norm: [%.2f]" % (best_unit, fc[best_unit], objective, obj_act, grad_norm)
 
     # Make an update
     src.data[:] += step_size/np.abs(g).mean() * g
 
     return (grad_norm, src.data[:].copy(), obj_act)
+
+
+'''
+Forward and backward passes through the generator DNN.
+'''
+def make_step_generator(net, x, x0, start, end, step_size=1):
+
+    src = net.blobs[start] # input image is stored in Net's 'data' blob
+    dst = net.blobs[end]
+
+    # L2 distance between init and target vector
+    net.blobs[end].diff[...] = (x-x0)
+    net.backward(start=end)
+    g = net.blobs[start].diff.copy()
+
+    grad_norm = norm(g)
+
+    # reset objective after each step
+    dst.diff.fill(0.)
+
+    # If norm is Nan, skip updating the image
+    if math.isnan(grad_norm):
+        return 1e-12, src.data[:].copy()  
+    elif grad_norm == 0:
+        return 0, src.data[:].copy()
+
+    # Make an update
+    src.data[:] += step_size/np.abs(g).mean() * g
+
+    return grad_norm, src.data[:].copy()
+
 
 
 def get_shape(data_shape):
