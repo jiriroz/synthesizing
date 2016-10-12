@@ -2,6 +2,7 @@
 '''
 Anh Nguyen <anh.ng8@gmail.com>
 2016-06-04
+Customized by Jiri Roznovjak <jiri.roznovjak@gmail.com>
 '''
 import os
 os.environ['GLOG_minloglevel'] = '2'  # suprress Caffe verbose prints
@@ -24,11 +25,12 @@ import argparse # parsing arguments
 
 mean = np.float32([104.0, 117.0, 123.0])
 
-fc_layers = ["fc6", "fc7", "fc8", "loss3/classifier", "fc1000", "prob"]
+fc_layers = ["fc6", "fc7", "fc8", "loss3/classifier", "fc1000", "prob", "fc8_oxford_102"]
 conv_layers = ["conv1", "conv2", "conv3", "conv4", "conv5"]
 
 if settings.gpu:
     caffe.set_mode_gpu() # uncomment this if gpu processing is available
+    caffe.set_device(3)
 
 def main():
 
@@ -40,7 +42,6 @@ def main():
 
     # which neuron to visualize
     print "-------------"
-    print " unit: %s  xy: %s" % (args.unit, args.xy)
     print " objective: %s" % (args.obj)
     print " n_iters: %s" % args.n_iters
     print " L2: %s" % args.L2
@@ -53,7 +54,6 @@ def main():
     print " clip: %s" % args.clip
     print " bound: %s" % args.bound
     print "-------------"
-    print " debug: %s" % args.debug
     print " output dir: %s" % args.output_dir
     print " net weights: %s" % args.net_weights
     print " net definition: %s" % args.net_definition
@@ -72,6 +72,11 @@ def main():
     net = caffe.Classifier(args.net_definition, args.net_weights,
                              mean = mean, # ImageNet mean
                              channel_swap = (2,1,0)) # the reference model has channels in BGR order instead of RGB
+    batch_size = 1
+    size = net.blobs["data"].data.shape[-1]
+    image_size = (3, size, size)
+    input_size = (batch_size, ) + image_size
+    net.blobs["data"].reshape(*input_size)
 
     # input / output layers in generator
     gen_in_layer = "feat"
@@ -85,8 +90,6 @@ def main():
 
     if args.init_file != "None":
         start_code, start_image = get_code(args.init_file, args.opt_layer)
-
-        print "Loaded start code: ", start_code.shape
     else:
         start_code = np.random.normal(0, 1, shape)
 
@@ -103,37 +106,59 @@ def main():
         lower_bound = np.zeros(start_code.shape)
 
     #compute objective
-    objective = computeObjective(args.obj, args.act_layer, net=net)
+    if args.mode == "unit":
+        objective = int(args.obj)
+    elif args.mode == "custom":
+        objective = computeObjective(args.obj, args.act_layer, net=net)
+    elif args.mode == "interpolate":
+        obj1, obj2 = args.obj.split(",")
+        obj1 = int(obj1)
+        obj2 = int(obj2)
+        code1 = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
+            clip=args.clip, xy=args.xy,
+            upper_bound=upper_bound, lower_bound=lower_bound, objective=obj1, output="code")
+        code2 = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
+            clip=args.clip, xy=args.xy,
+            upper_bound=upper_bound, lower_bound=lower_bound, objective=obj2, output="code")
+        steps = 100 #Number of steps between one and the other code
+        #interpolation between two
+        """step = (code2 - code1) / steps
+        for i in range(steps + 1):
+            print "Interpolation step %d" % i
+            code = code1 + step * i
+            print np.sum(code)
+            generated = generator.forward(feat=code)
+            img = generated[gen_out_layer]   # 256x256
+            filename = "results/interpolated%d.jpg" % i
+            save_image(img, filename)
+        """
+        #random walk
+        step_size = np.mean(np.abs(code2 - code1)/2)
+        code = code1
+        for i in range(steps):
+            step = step_size * np.random.choice([-1, 1], size=code1.shape)
+            code = code + step
+            generated = generator.forward(feat=code)
+            img = generated[gen_out_layer]   # 256x256
+            filename = "results/interpolated%d.jpg" % i
+            save_image(img, filename)
+        return
 
     # Optimize a code via gradient ascent
     output_image = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
-        clip=args.clip, unit=args.unit, xy=args.xy, debug=args.debug,
+        clip=args.clip, xy=args.xy, 
         upper_bound=upper_bound, lower_bound=lower_bound, objective=objective)
 
-    # Save image
-    filename = "%s/%s_%s_%s_%s_%s__%s.jpg" % (
-            args.output_dir,
-            args.act_layer, 
-            str(args.unit).zfill(4), 
-            str(args.n_iters).zfill(2), 
-            args.L2, 
-            args.start_lr,
-            args.seed
-            )
-    filename = "example.jpg" #overwrite for simple access
-
+    filename = "examples/example%d.jpg" % objective
     # Save image
     save_image(output_image, filename)
     print "Saved to %s" % filename
 
-    if args.debug:
-        save_image(output_image, "./debug/%s.jpg" % str(args.n_iters).zfill(3))
-
 
 def parseArguments():
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('--unit', metavar='unit', type=int, help='an unit to visualize e.g. [0, 999]')
-    parser.add_argument('--obj', metavar='obj', type=str, default="", help='an objective (filename)')
+    parser.add_argument('--obj', metavar='obj', type=str, default="", help='an objective (a filename or a class)')
+    parser.add_argument('--mode', metavar='mode', type=str, default='class', help='Mode (unit, interpolate, custom)')
     parser.add_argument('--n_iters', metavar='iter', type=int, default=10, help='Number of iterations')
     parser.add_argument('--L2', metavar='w', type=float, default=1.0, nargs='?', help='L2 weight')
     parser.add_argument('--start_lr', metavar='lr', type=float, default=2.0, nargs='?', help='Learning rate')
@@ -143,7 +168,6 @@ def parseArguments():
     parser.add_argument('--opt_layer', metavar='s', type=str, help='Layer at which we optimize a code')
     parser.add_argument('--act_layer', metavar='s', type=str, default="fc8", help='Layer at which we activate a neuron')
     parser.add_argument('--init_file', metavar='s', type=str, default="None", help='Init image')
-    parser.add_argument('--debug', metavar='b', type=int, default=0, help='Print out the images or not')
     parser.add_argument('--clip', metavar='b', type=int, default=0, help='Clip out within a code range')
     parser.add_argument('--bound', metavar='b', type=str, default="", help='The file to an array that is the upper bound for activation range')
     parser.add_argument('--output_dir', metavar='b', type=str, default=".", help='Output directory for saving results')
@@ -157,28 +181,27 @@ def parseArguments():
 
 def computeObjective(obj, act_layer, net=None):
 
-    if obj != "":
-        objective, _ = get_code(obj, act_layer, net=net)
+    objective, _ = get_code(obj, act_layer, net=net)
 
     #custom objective here
 
-    objective = get_average(["cat.jpg", "black_cat.jpg", "yellow_cat.jpg"], act_layer, net)
+    #objective = get_average(["cat.jpg"], act_layer, net)
 
     #Image arithmetic
-    #base_img, _ = get_code("cat_leash2.jpg", act_layer, net=net)
-    #img_subtract, _ = get_code("cat_noleash.jpg", act_layer, net=net)
-    #img_onto, _ = get_code("dog.jpg", act_layer, net=net)
+    #base_img, _ = get_code("data/beer_glass.jpg", act_layer, net=net)
+    #img_subtract, _ = get_code("data/no_beer_glass.jpg", act_layer, net=net)
+    #img_onto, _ = get_code("data/no_beer_glass2.jpg", act_layer, net=net)
     #diff = base_img - img_subtract
-    #objective = diff + img_onto
+    #objective = diff
     return objective
 
 def get_average(imgs, act, net):
     reprs = [get_code("data/" + im, act, net=net)[0] for im in imgs]
-    return np.mean(reprs)
+    return np.mean(reprs, axis=0)
 
 
 def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
-        clip=False, debug=False, unit=None, xy=0, upper_bound=None, lower_bound=None, objective=None):
+        clip=False, xy=0, upper_bound=None, lower_bound=None, objective=None, output="image"):
 
     # Get the input and output sizes
     data_shape = net.blobs['data'].data.shape
@@ -258,15 +281,9 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
         # Update code
         src.data[:] = updated_code
 
-        # Print x every 10 iterations
-        if debug:
-            print " > %s " % i
-            name = "./debug/%s.jpg" % str(i).zfill(3)
-
-            save_image(x.copy(), name)
-
-            # Save acts for later
-            list_acts.append( (name, act) )
+        if i % 5 == 0:
+            name = "debug/%s.jpg" % str(i).zfill(3)
+            #save_image(x.copy(), name)
 
         # Stop if grad is 0
         if grad_norm_generator == 0:
@@ -280,15 +297,10 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
     print " -------------------------"
     print " Result: obj act [%s] " % best_act
 
-    if debug:
-        print "Saving list of activations..."
-        for p in list_acts:
-            name = p[0]
-            act = p[1]
-
-            write_label(name, act)
-
-    return best_xx
+    if output == "image":
+        return best_xx
+    elif output == "code":
+        return src.data[:].copy()
 
 
 '''
@@ -296,10 +308,20 @@ Push the given image through an encoder to get a code.
 '''
 def get_code(path, layer, net=None):
 
+    # initialize the encoder
+    if net == None:
+        encoder = caffe.Net(settings.encoder_definition, settings.encoder_weights, caffe.TEST)
+    else:
+        encoder = net
 
     # set up the inputs for the net: 
     batch_size = 1
-    image_size = (3, 227, 227)
+    size = encoder.blobs["data"].data.shape[-1]
+    image_size = (3, size, size)
+
+    input_size = (batch_size, ) + image_size
+    encoder.blobs["data"].reshape(*input_size)
+
     images = np.zeros((batch_size,) + image_size, dtype='float32')
 
     in_image = scipy.misc.imread(path)
@@ -318,12 +340,6 @@ def get_code(path, layer, net=None):
     image_mean = image_mean[topleft[0]:topleft[0]+image_size[1], topleft[1]:topleft[1]+image_size[2]]
     del matfile
     data -= np.expand_dims(np.transpose(image_mean, (2,0,1)), 0) # mean is already BGR
-
-    # initialize the encoder
-    if net == None:
-        encoder = caffe.Net(settings.encoder_definition, settings.encoder_weights, caffe.TEST)
-    else:
-        encoder = net
 
     # run encoder and extract the features
     encoder.forward(data=data)
