@@ -44,7 +44,7 @@ def main():
     print "-------------"
     print " objective: %s" % (args.obj)
     print " n_iters: %s" % args.n_iters
-    print " L2: %s" % args.L2
+    print " L2: %s" % args.lambd
     print " start learning rate: %s" % args.start_lr
     print " end learning rate: %s" % args.end_lr
     print " seed: %s" % args.seed
@@ -62,7 +62,8 @@ def main():
     params = {
     'layer': args.act_layer,
     'iter_n': args.n_iters,
-    'L2': args.L2,
+    'L2': args.lambd,
+    'gamma':args.gamma,
     'start_step_size': args.start_lr,
     'end_step_size': args.end_lr
     }
@@ -110,6 +111,8 @@ def main():
         objective = int(args.obj)
     elif args.mode == "custom":
         objective = computeObjective(args.obj, args.act_layer, net=net)
+    elif args.mode == "multiple":
+        objective = [int(o) for o in args.obj.split(",")]
     elif args.mode == "interpolate":
         obj1, obj2 = args.obj.split(",")
         obj1 = int(obj1)
@@ -149,7 +152,7 @@ def main():
         clip=args.clip, xy=args.xy, 
         upper_bound=upper_bound, lower_bound=lower_bound, objective=objective)
 
-    filename = "examples/example%d.jpg" % objective
+    filename = "example.jpg"
     # Save image
     save_image(output_image, filename)
     print "Saved to %s" % filename
@@ -160,7 +163,8 @@ def parseArguments():
     parser.add_argument('--obj', metavar='obj', type=str, default="", help='an objective (a filename or a class)')
     parser.add_argument('--mode', metavar='mode', type=str, default='class', help='Mode (unit, interpolate, custom)')
     parser.add_argument('--n_iters', metavar='iter', type=int, default=10, help='Number of iterations')
-    parser.add_argument('--L2', metavar='w', type=float, default=1.0, nargs='?', help='L2 weight')
+    parser.add_argument('--lambd', metavar='lambda', type=float, default=1.0, nargs='?', help='Regularization parameter')
+    parser.add_argument('--gamma', metavar='gamma', type=float, default=1.0, nargs='?', help='Distance between neurons regularization')
     parser.add_argument('--start_lr', metavar='lr', type=float, default=2.0, nargs='?', help='Learning rate')
     parser.add_argument('--end_lr', metavar='lr', type=float, default=-1.0, nargs='?', help='Ending Learning rate')
     parser.add_argument('--seed', metavar='n', type=int, default=0, nargs='?', help='Learning rate')
@@ -249,7 +253,7 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
 
         # 2. forward pass the image x0 to net to maximize an unit k
         # 3. backprop the gradient from net to the image to get an updated image x
-        grad_norm_net, x, act = make_step_net(net=net, end=layer, objective=objective, image=cropped_x0, xy=xy, step_size=step_size, output=i % 5 == 0)
+        grad_norm_net, x, act, reg_penalty = make_step_net(net=net, end=layer, objective=objective, image=cropped_x0, xy=xy, step_size=step_size, output=i % 5 == 0)
         
         # Save the solution
         # Note that we're not saving the solutions with the highest activations
@@ -277,6 +281,8 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
         # L2 on code to make the feature vector smaller every iteration
         if params['L2'] > 0 and params['L2'] < 1:
             updated_code[:] *= params['L2']
+        if reg_penalty != None:
+            updated_code[:] -= params['gamma'] * reg_penalty
 
         # Update code
         src.data[:] = updated_code
@@ -369,7 +375,11 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True):
     else:
         # Move in the direction of increasing activation of the given neuron
         if end in fc_layers:
-            updated_diff.flat[objective] = 1.
+            if type(objective) is list:
+                for obj in objective:
+                    updated_diff.flat[obj] = 1.
+            else:
+                updated_diff.flat[objective] = 1.
         elif end in conv_layers:
             updated_diff[:, objective, xy, xy] = 1.
         else:
@@ -386,16 +396,23 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True):
     # reset objective after each step
     dst.diff.fill(0.)
 
+    reg_penalty = None
     # If grad norm is Nan, skip updating
     if math.isnan(grad_norm):
-        return 1e-12, src.data[:].copy(), obj_act
+        return 1e-12, src.data[:].copy(), obj_act, reg_penalty
     elif grad_norm == 0:
-        return 0, src.data[:].copy(), obj_act
+        return 0, src.data[:].copy(), obj_act, reg_penalty
 
     # Check the activations
     if type(objective) is np.ndarray:
         best_unit = 0
         obj_act = 0
+    elif type(objective) is list:
+        fc = acts[end][0]
+        activations = [fc[obj] for obj in objective]
+        best_unit = fc.argmax()
+        mean = np.mean(activations)
+        #reg_penalty = np.sum(np.abs(np.array(activations) - mean))
     elif end in fc_layers:
         fc = acts[end][0]
         best_unit = fc.argmax()
@@ -409,13 +426,20 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True):
         if type(objective) is np.ndarray:
             diff_norm = norm(updated_diff)
             print "Diff norm: %.2f, opt norm: %.2f" % (diff_norm, grad_norm)
+        elif type(objective) is list:
+            out = "max: %4s [%.2f] " % (best_unit, fc[best_unit])
+            for i in range(len(objective)):
+                unit = objective[i]
+                act = activations[i]
+                out = out + " %d: %.2f " % (unit, act)
+            print out
         else:
             print "max: %4s [%.2f]\t obj: %4s [%.2f]\t norm: [%.2f]" % (best_unit, fc[best_unit], objective, obj_act, grad_norm)
 
     # Make an update
     src.data[:] += step_size/np.abs(g).mean() * g
 
-    return (grad_norm, src.data[:].copy(), obj_act)
+    return (grad_norm, src.data[:].copy(), obj_act, reg_penalty)
 
 
 '''
