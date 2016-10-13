@@ -147,15 +147,10 @@ def main():
             save_image(img, filename)
         return
 
-    feat_layer = "conv3"
-    img = ""
-    feat_objective = get_code(img, feat_layer, net=net)
-    feat_objective = {feat_layer: feat_objective}
-
     # Optimize a code via gradient ascent
     output_image = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
         clip=args.clip, xy=args.xy, 
-        upper_bound=upper_bound, lower_bound=lower_bound, objective=objective, feat_objective=feat_objective)
+        upper_bound=upper_bound, lower_bound=lower_bound, objective=objective)
 
     filename = "example.jpg"
     # Save image
@@ -400,28 +395,8 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, ga
                 
     dst.diff[:] = updated_diff
 
-    loss = 0.0
-
-    if feat_objective != None:
-        feat_layers = feat_objective.keys()
-        #Only one layer for now
-        l = feat_layers[0]
-        F = net.blobs[l].data[0]
-
-        featLoss, featGrad = compFeatureGrad(F, feat_objective[l])
-        loss += featLoss * featContr
-
-        net.backward(start=end, end=l)
-
-        diff = net.blobs[l].diff[0]
-        diff += featGrad.reshape(diff.shape) * featContr
-
-    new_end = end
-    if feat_objective != None:
-        new_end = feat_objective.keys()[0]
-
     # Get back the gradient at the optimization layer
-    diffs = net.backward(start=new_end, diffs=['data'])
+    diffs = net.backward(start=end, diffs=['data'])
     g = diffs['data'][0]
 
     grad_norm = norm(g)
@@ -500,12 +475,6 @@ def make_step_generator(net, x, x0, start, end, step_size=1):
     src.data[:] += step_size/np.abs(g).mean() * g
 
     return grad_norm, src.data[:].copy()
-
-def compFeatureGrad(F, F_guide):
-    E = F - F_guide
-    loss = np.sum(np.square(E)) / 2
-    grad = E * (F > 0)
-    return loss, grad
 
 def get_shape(data_shape):
 
