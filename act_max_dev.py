@@ -147,10 +147,15 @@ def main():
             save_image(img, filename)
         return
 
+    feat_layer = "conv3"
+    img = ""
+    feat_objective = get_code(img, feat_layer, net=net)
+    feat_objective = {feat_layer: feat_objective}
+
     # Optimize a code via gradient ascent
     output_image = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
         clip=args.clip, xy=args.xy, 
-        upper_bound=upper_bound, lower_bound=lower_bound, objective=objective)
+        upper_bound=upper_bound, lower_bound=lower_bound, objective=objective, feat_objective=feat_objective)
 
     filename = "example.jpg"
     # Save image
@@ -205,7 +210,7 @@ def get_average(imgs, act, net):
 
 
 def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
-        clip=False, xy=0, upper_bound=None, lower_bound=None, objective=None, output="image"):
+        clip=False, xy=0, upper_bound=None, lower_bound=None, objective=None, output="image", feat_objective=None):
 
     # Get the input and output sizes
     data_shape = net.blobs['data'].data.shape
@@ -253,7 +258,9 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
 
         # 2. forward pass the image x0 to net to maximize an unit k
         # 3. backprop the gradient from net to the image to get an updated image x
-        grad_norm_net, x, act, reg_penalty = make_step_net(net=net, end=layer, objective=objective, image=cropped_x0, xy=xy, step_size=step_size, output=i % 5 == 0)
+        grad_norm_net, x, act, reg_penalty = make_step_net(net=net, end=layer, objective=objective, image=cropped_x0,
+                                                            xy=xy, step_size=step_size, output=i % 5 == 0, gamma=params['gamma'],
+                                                            feat_objective=feat_objective)
         
         # Save the solution
         # Note that we're not saving the solutions with the highest activations
@@ -282,7 +289,7 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
         if params['L2'] > 0 and params['L2'] < 1:
             updated_code[:] *= params['L2']
         if reg_penalty != None:
-            updated_code[:] -= params['gamma'] * reg_penalty
+            updated_code[:] -= reg_penalty
 
         # Update code
         src.data[:] = updated_code
@@ -359,7 +366,7 @@ def get_code(path, layer, net=None):
 '''
 Forward and backward passes through the DNN being visualized.
 '''
-def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True):
+def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, gamma=1.0):
 
 
     src = net.blobs['data'] # input image
@@ -376,8 +383,14 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True):
         # Move in the direction of increasing activation of the given neuron
         if end in fc_layers:
             if type(objective) is list:
+                activations = [acts[end][0][obj] for obj in objective]
+                mean_acts = np.mean(activations)
+                reg_penalty = gamma * np.sum(np.square(activations - mean_acts))
                 for obj in objective:
                     updated_diff.flat[obj] = 1.
+                for i in range(len(objective)):
+                    di = -2 * gamma * (activations[i] - mean_acts) * (1 - 1.0/len(activations))
+                    updated_diff.flat[objective[i]] += di
             else:
                 updated_diff.flat[objective] = 1.
         elif end in conv_layers:
@@ -387,8 +400,28 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True):
                 
     dst.diff[:] = updated_diff
 
+    loss = 0.0
+
+    if feat_objective != None:
+        feat_layers = feat_objective.keys()
+        #Only one layer for now
+        l = feat_layers[0]
+        F = net.blobs[l].data[0]
+
+        featLoss, featGrad = compFeatureGrad(F, feat_objective[l])
+        loss += featLoss * featContr
+
+        net.backward(start=end, end=l)
+
+        diff = net.blobs[l].diff[0]
+        diff += featGrad.reshape(diff.shape) * featContr
+
+    new_end = end
+    if feat_objective != None:
+        new_end = feat_objective.keys()[0]
+
     # Get back the gradient at the optimization layer
-    diffs = net.backward(start=end, diffs=['data'])
+    diffs = net.backward(start=new_end, diffs=['data'])
     g = diffs['data'][0]
 
     grad_norm = norm(g)
@@ -409,10 +442,7 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True):
         obj_act = 0
     elif type(objective) is list:
         fc = acts[end][0]
-        activations = [fc[obj] for obj in objective]
         best_unit = fc.argmax()
-        mean = np.mean(activations)
-        #reg_penalty = np.sum(np.abs(np.array(activations) - mean))
     elif end in fc_layers:
         fc = acts[end][0]
         best_unit = fc.argmax()
@@ -471,7 +501,11 @@ def make_step_generator(net, x, x0, start, end, step_size=1):
 
     return grad_norm, src.data[:].copy()
 
-
+def compFeatureGrad(F, F_guide):
+    E = F - F_guide
+    loss = np.sum(np.square(E)) / 2
+    grad = E * (F > 0)
+    return loss, grad
 
 def get_shape(data_shape):
 
