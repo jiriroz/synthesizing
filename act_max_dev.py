@@ -80,6 +80,7 @@ def main():
     net.blobs["data"].reshape(*input_size)
 
     # input / output layers in generator
+    #gen_in_layer = "defc7"
     gen_in_layer = "feat"
     gen_out_layer = "deconv0"
 
@@ -113,44 +114,17 @@ def main():
         objective = computeObjective(args.obj, args.act_layer, net=net)
     elif args.mode == "multiple":
         objective = [int(o) for o in args.obj.split(",")]
-    elif args.mode == "interpolate":
-        obj1, obj2 = args.obj.split(",")
-        obj1 = int(obj1)
-        obj2 = int(obj2)
-        code1 = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
-            clip=args.clip, xy=args.xy,
-            upper_bound=upper_bound, lower_bound=lower_bound, objective=obj1, output="code")
-        code2 = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
-            clip=args.clip, xy=args.xy,
-            upper_bound=upper_bound, lower_bound=lower_bound, objective=obj2, output="code")
-        steps = 100 #Number of steps between one and the other code
-        #interpolation between two
-        """step = (code2 - code1) / steps
-        for i in range(steps + 1):
-            print "Interpolation step %d" % i
-            code = code1 + step * i
-            print np.sum(code)
-            generated = generator.forward(feat=code)
-            img = generated[gen_out_layer]   # 256x256
-            filename = "results/interpolated%d.jpg" % i
-            save_image(img, filename)
-        """
-        #random walk
-        step_size = np.mean(np.abs(code2 - code1)/2)
-        code = code1
-        for i in range(steps):
-            step = step_size * np.random.choice([-1, 1], size=code1.shape)
-            code = code + step
-            generated = generator.forward(feat=code)
-            img = generated[gen_out_layer]   # 256x256
-            filename = "results/interpolated%d.jpg" % i
-            save_image(img, filename)
-        return
+
+    feat_layer = "conv3"
+    img = "data/tabby.jpg"
+    feat_objective, _ = get_code(img, feat_layer, net=net)
+    feat_objective = {feat_layer: feat_objective}
 
     # Optimize a code via gradient ascent
     output_image = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
         clip=args.clip, xy=args.xy, 
-        upper_bound=upper_bound, lower_bound=lower_bound, objective=objective)
+        upper_bound=upper_bound, lower_bound=lower_bound, objective=objective
+        feat_objective=feat_objective)
 
     filename = "example.jpg"
     # Save image
@@ -161,7 +135,7 @@ def main():
 def parseArguments():
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('--obj', metavar='obj', type=str, default="", help='an objective (a filename or a class)')
-    parser.add_argument('--mode', metavar='mode', type=str, default='class', help='Mode (unit, interpolate, custom)')
+    parser.add_argument('--mode', metavar='mode', type=str, default='class', help='Mode (unit, multiple, interpolate, custom)')
     parser.add_argument('--n_iters', metavar='iter', type=int, default=10, help='Number of iterations')
     parser.add_argument('--lambd', metavar='lambda', type=float, default=1.0, nargs='?', help='Regularization parameter')
     parser.add_argument('--gamma', metavar='gamma', type=float, default=1.0, nargs='?', help='Distance between neurons regularization')
@@ -186,6 +160,7 @@ def parseArguments():
 def computeObjective(obj, act_layer, net=None):
 
     objective, _ = get_code(obj, act_layer, net=net)
+    return objective
 
     #custom objective here
 
@@ -197,6 +172,16 @@ def computeObjective(obj, act_layer, net=None):
     #img_onto, _ = get_code("data/no_beer_glass2.jpg", act_layer, net=net)
     #diff = base_img - img_subtract
     #objective = diff
+
+    #Image intersection
+    img1, _ = get_code("data/black_cat.jpg", act_layer, net=net)
+    img2, _ = get_code("data/yellow_cat.jpg", act_layer, net=net)
+    sub = np.abs(img1 - img2)
+    meandiff = np.mean(sub)
+    mean = (img1 + img2) / 2
+    #Threshold everything above mean difference
+    mask = (sub < meandiff * 1.5).astype(int)
+    objective = mask * mean
     return objective
 
 def get_average(imgs, act, net):
@@ -289,9 +274,9 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
         # Update code
         src.data[:] = updated_code
 
-        if i % 5 == 0:
-            name = "debug/%s.jpg" % str(i).zfill(3)
-            #save_image(x.copy(), name)
+        #if i % 5 == 0:
+        #    name = "debug/%s.jpg" % str(i).zfill(3)
+        #    save_image(x.copy(), name)
 
         # Stop if grad is 0
         if grad_norm_generator == 0:
@@ -361,8 +346,7 @@ def get_code(path, layer, net=None):
 '''
 Forward and backward passes through the DNN being visualized.
 '''
-def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, gamma=1.0):
-
+def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, gamma=1.0, feat_objective=None, featContr=1.0):
 
     src = net.blobs['data'] # input image
     dst = net.blobs[end]
@@ -395,8 +379,28 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, ga
                 
     dst.diff[:] = updated_diff
 
+    loss = 0.0
+
+    if feat_objective != None:
+        feat_layers = feat_objective.keys()
+        #Only one layer for now
+        l = feat_layers[0]
+        F = net.blobs[l].data[0]
+
+        featLoss, featGrad = compFeatureGrad(F, feat_objective[l])
+        loss += featLoss * featContr
+
+        net.backward(start=end, end=l)
+
+        diff = net.blobs[l].diff[0]
+        diff += featGrad.reshape(diff.shape) * featContr
+
+    new_end = end
+    if feat_objective != None:
+        new_end = feat_objective.keys()[0]
+
     # Get back the gradient at the optimization layer
-    diffs = net.backward(start=end, diffs=['data'])
+    diffs = net.backward(start=new_end, diffs=['data'])
     g = diffs['data'][0]
 
     grad_norm = norm(g)
@@ -475,6 +479,12 @@ def make_step_generator(net, x, x0, start, end, step_size=1):
     src.data[:] += step_size/np.abs(g).mean() * g
 
     return grad_norm, src.data[:].copy()
+
+def compFeatureGrad(F, F_guide):
+    E = F - F_guide
+    loss = np.sum(np.square(E)) / 2
+    grad = E * (F > 0)
+    return loss, grad
 
 def get_shape(data_shape):
 
