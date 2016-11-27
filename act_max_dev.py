@@ -514,7 +514,7 @@ def make_step_generator(net, x, x0, start, end, step_size=1):
     #print "ratio: ", norm(grad) / norm(src.data)
     #print "src sample before: ", src.data[0][0]
     #print "grad sample: ", grad[0][0]
-    print "grad norm", norm(grad)
+    #print "grad norm", norm(grad)
     src.data[:] += grad
     #print "src sample after: ", src.data[0][0]
     return grad_norm, src.data[:].copy()

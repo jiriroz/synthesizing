@@ -12,7 +12,6 @@ IFS=$'\n' read -d '' -r -a labels < ${path_labels}
 
 opt_layer="fc6"
 act_layer="fc8"
-#act_layer="prob"
 xy=0
 
 # Net
@@ -22,8 +21,10 @@ xy=0
 # Hyperparam settings for visualizing GoogLeNet
 # Note that the learnign rate is different from that for AlexNet
 iters="400"
-weights="985"
-rates=1
+#weights="985"
+weights="99"
+#rates="1.0"
+rates="8.0"
 end_lr=1e-10
 
 # Clipping
