@@ -80,8 +80,8 @@ def main():
     net.blobs["data"].reshape(*input_size)
 
     # input / output layers in generator
-    #gen_in_layer = "defc7"
     gen_in_layer = "feat"
+    #gen_in_layer = "defc7"
     gen_out_layer = "deconv0"
 
     # shape of the code being optimized
@@ -115,16 +115,21 @@ def main():
     elif args.mode == "multiple":
         objective = [int(o) for o in args.obj.split(",")]
 
-    feat_layer = "conv3"
+    feat_layer = "conv1"
     img = "data/tabby.jpg"
     feat_objective, _ = get_code(img, feat_layer, net=net)
     feat_objective = {feat_layer: feat_objective}
+    feat_objective = None
 
     # Optimize a code via gradient ascent
+    #output_image = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
+    #    clip=args.clip, xy=args.xy, 
+    #    upper_bound=upper_bound, lower_bound=lower_bound, objective=objective, 
+    #    feat_objective=feat_objective)
     output_image = activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
         clip=args.clip, xy=args.xy, 
-        upper_bound=upper_bound, lower_bound=lower_bound, objective=objective
-        feat_objective=feat_objective)
+        upper_bound=upper_bound, lower_bound=lower_bound, objective=objective, 
+        feat_objective=feat_objective, layers=["feat"])
 
     filename = "example.jpg"
     # Save image
@@ -190,7 +195,9 @@ def get_average(imgs, act, net):
 
 
 def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_code, params, 
-        clip=False, xy=0, upper_bound=None, lower_bound=None, objective=None, output="image", feat_objective=None):
+        clip=False, xy=0, upper_bound=None, lower_bound=None, objective=None, output="image", feat_objective=None, depth=0, layers=[]):
+
+    gen_in_layer = layers[depth]
 
     # Get the input and output sizes
     data_shape = net.blobs['data'].data.shape
@@ -228,9 +235,19 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
     for i in xrange(params['iter_n']):
 
         step_size = params['start_step_size'] + ((params['end_step_size'] - params['start_step_size']) * i) / params['iter_n']
-        
+        #Jiri modification
+        #if depth > 0:
+        #    step_size = 1e2 * step_size
+
         # 1. pass the code to generator to get an image x0
-        generated = generator.forward(feat=src.data[:])
+        if depth == 0:
+            generated = generator.forward(feat=src.data[:])
+        else:
+            generator.blobs[gen_in_layer].data[...] = src.data[:]
+            #print "src norm 0", norm(src.data), " vs ", norm(generator.blobs[gen_in_layer].data)
+            generated = generator.forward(start=gen_in_layer)
+            #print "src norm 0.5", norm(generator.blobs[gen_in_layer].data)
+
         x0 = generated[gen_out_layer]   # 256x256
 
         # Crop from 256x256 to 227x227
@@ -252,18 +269,19 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
         updated_x0 = x0.copy()        
         updated_x0[:,:,topleft[0]:topleft[0]+image_size[0], topleft[1]:topleft[1]+image_size[1]] = x.copy()
 
+
         # 5. backprop the image to generator to get an updated code
         grad_norm_generator, updated_code = make_step_generator(net=generator, x=updated_x0, x0=x0, 
                 start=gen_in_layer, end=gen_out_layer, step_size=step_size)
 
+
         # Clipping code
         if clip:
             updated_code = np.clip(updated_code, a_min=-1, a_max=1) # VAE prior is within N(0,1)
-
             # Clipping each neuron independently
         elif upper_bound is not None:
             updated_code = np.maximum(updated_code, lower_bound) 
-            updated_code = np.minimum(updated_code, upper_bound) 
+            updated_code = np.minimum(updated_code, upper_bound)
 
         # L2 on code to make the feature vector smaller every iteration
         if params['L2'] > 0 and params['L2'] < 1:
@@ -273,9 +291,11 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
 
         # Update code
         src.data[:] = updated_code
+        #print "src norm 2", norm(src.data)
 
         #if i % 5 == 0:
-        #    name = "debug/%s.jpg" % str(i).zfill(3)
+        #    index = i + depth * 1000
+        #    name = "debug/%s.jpg" % str(index).zfill(3)
         #    save_image(x.copy(), name)
 
         # Stop if grad is 0
@@ -290,10 +310,19 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
     print " -------------------------"
     print " Result: obj act [%s] " % best_act
 
-    if output == "image":
+    #if output == "image":
+    if depth == len(layers) - 1:
         return best_xx
-    elif output == "code":
-        return src.data[:].copy()
+    else:
+        if depth == 0:
+            generated = generator.forward(feat=src.data[:], end=layers[depth + 1])
+        else:
+            generator.blobs[gen_in_layer].data[...] = src.data[:]
+            generated = generator.forward(start=gen_in_layer, end=layers[depth + 1])
+        new_start = generated[layers[depth + 1]]
+        return activation_maximization(net, generator, gen_in_layer, gen_out_layer, new_start, params,
+                        clip=clip, xy=xy, upper_bound=upper_bound, lower_bound=lower_bound, objective=objective, feat_objective=feat_objective, depth=depth+1, layers=layers)
+        #return src.data[:].copy()
 
 
 '''
@@ -346,7 +375,7 @@ def get_code(path, layer, net=None):
 '''
 Forward and backward passes through the DNN being visualized.
 '''
-def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, gamma=1.0, feat_objective=None, featContr=1.0):
+def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, gamma=1.0, feat_objective=None):
 
     src = net.blobs['data'] # input image
     dst = net.blobs[end]
@@ -371,7 +400,9 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, ga
                     di = -2 * gamma * (activations[i] - mean_acts) * (1 - 1.0/len(activations))
                     updated_diff.flat[objective[i]] += di
             else:
-                updated_diff.flat[objective] = 1.
+                if objective != -1:
+                    #updated_diff.flat[objective] = 7 * 1e6
+                    updated_diff.flat[objective] = 1.0
         elif end in conv_layers:
             updated_diff[:, objective, xy, xy] = 1.
         else:
@@ -388,12 +419,13 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, ga
         F = net.blobs[l].data[0]
 
         featLoss, featGrad = compFeatureGrad(F, feat_objective[l])
-        loss += featLoss * featContr
+        print "Feat loss: {}, feat grad: {}".format(featLoss, norm(featGrad))
+        loss += featLoss * 1.0
 
         net.backward(start=end, end=l)
 
         diff = net.blobs[l].diff[0]
-        diff += featGrad.reshape(diff.shape) * featContr
+        diff += featGrad.reshape(diff.shape) * (-1.0) * 1
 
     new_end = end
     if feat_objective != None:
@@ -443,7 +475,8 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, ga
                 out = out + " %d: %.2f " % (unit, act)
             print out
         else:
-            print "max: %4s [%.2f]\t obj: %4s [%.2f]\t norm: [%.2f]" % (best_unit, fc[best_unit], objective, obj_act, grad_norm)
+            if objective != -1:
+                print "max: %4s [%.2f]\t obj: %4s [%.2f]\t norm: [%.2f]" % (best_unit, fc[best_unit], objective, obj_act, grad_norm)
 
     # Make an update
     src.data[:] += step_size/np.abs(g).mean() * g
@@ -455,6 +488,7 @@ def make_step_net(net, end, objective, image, xy=0, step_size=1, output=True, ga
 Forward and backward passes through the generator DNN.
 '''
 def make_step_generator(net, x, x0, start, end, step_size=1):
+
 
     src = net.blobs[start] # input image is stored in Net's 'data' blob
     dst = net.blobs[end]
@@ -476,8 +510,13 @@ def make_step_generator(net, x, x0, start, end, step_size=1):
         return 0, src.data[:].copy()
 
     # Make an update
-    src.data[:] += step_size/np.abs(g).mean() * g
-
+    grad = step_size/np.abs(g).mean() * g
+    #print "ratio: ", norm(grad) / norm(src.data)
+    #print "src sample before: ", src.data[0][0]
+    #print "grad sample: ", grad[0][0]
+    print "grad norm", norm(grad)
+    src.data[:] += grad
+    #print "src sample after: ", src.data[0][0]
     return grad_norm, src.data[:].copy()
 
 def compFeatureGrad(F, F_guide):
