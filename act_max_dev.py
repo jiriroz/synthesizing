@@ -240,7 +240,7 @@ def activation_maximization(net, generator, gen_in_layer, gen_out_layer, start_c
         #    step_size = 1e2 * step_size
 
         # 1. pass the code to generator to get an image x0
-        if depth == 0:
+        if gen_in_layer == "feat":
             generated = generator.forward(feat=src.data[:])
         else:
             generator.blobs[gen_in_layer].data[...] = src.data[:]
